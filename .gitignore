@@ -5,3 +5,9 @@
 a.out
 # scratch
 scratch_*
+# MNIST data (downloaded by the notebooks) and trained models
+examples/mnist/data/
+*.bin
+mnist_mlp
+mnist_cnn
+mk

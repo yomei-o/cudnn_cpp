@@ -19,6 +19,11 @@ plain-C++ reference. cuDNN & cuBLAS share the optional Eigen backend. The rest o
 README focuses on cuDNN; the others are summarized below
 ([cuBLAS](#cublas_cpuh) · [Thrust](#thrust_cpuh) · [runtime](#cuda_runtime_cpuh)).
 
+> **📚 Worked example — [`examples/mnist`](examples/mnist/README.md):** train an MLP
+> (cuBLAS+Thrust) and a CNN (cuDNN+cuBLAS+Thrust) on MNIST, then read a PNG and predict
+> the digit. The **same source builds on CPU (g++) or GPU (nvcc)** — four Colab notebooks
+> let students compare `images/sec` and *see* what a GPU buys them. Bilingual (JP/EN).
+
 ---
 
 `cudnn_cpu.h` — a **CPU implementation of the cuDNN API subset**
