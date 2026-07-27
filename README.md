@@ -1,6 +1,20 @@
 # cudnn_cpp
 
-A tiny, **header-only, source-available CPU implementation of the cuDNN API subset**
+Tiny, **header-only, source-available CPU implementations of the CUDA GPU-library APIs**
+that YOLO-style detectors use — **cuDNN**, **cuBLAS**, (Thrust next) — so you can develop
+and correctness-test CUDA/GPU code on a **machine with no GPU** and no CUDA install.
+
+| header | replaces | for |
+|---|---|---|
+| [`cudnn_cpu.h`](cudnn_cpu.h) | `<cudnn.h>` | conv/act/pool/softmax/bn — forward **and backward** |
+| [`cublas_cpu.h`](cublas_cpu.h) | `<cublas_v2.h>` | sgemm (+strided-batched), gemv, ger, level-1 |
+
+Both share the optional Eigen backend and the same drop-in idea. The rest of this README
+focuses on cuDNN; cuBLAS is summarized [below](#cublas_cpuh).
+
+---
+
+`cudnn_cpu.h` — a **CPU implementation of the cuDNN API subset**
 that YOLO-style detectors use — so you can develop and correctness-test cuDNN/GPU code
 on a **machine with no GPU** and no cuDNN install.
 
@@ -82,8 +96,28 @@ g++ -std=c++17 -O3 -I. -DCUDNN_CPU_USE_EIGEN bench_conv.cpp -o b && ./b
 `test_cudnn_cpu.cpp` checks every op against an independent naive reference; both
 backends produce identical results (diffs are float rounding only).
 
+## cublas_cpu.h
+
+CPU implementation of the cuBLAS (single-precision) subset, honoring cuBLAS's
+**column-major** layout, `op(A)` transposes and `lda/ldb/ldc` exactly:
+
+`cublasSgemm` (all N/T combos, with beta), `cublasSgemmStridedBatched`,
+`cublasSgemv`, `cublasSger`, and level-1 `Saxpy/Sscal/Scopy/Sdot/Sasum/Snrm2/Isamax/Sswap`.
+`Isamax` returns a 1-based index like the real one. Optional Eigen backend via
+`CUBLAS_CPU_USE_EIGEN` (Eigen is column-major too, so the map is direct).
+
+```sh
+g++ -std=c++17 -O2 -I. test_cublas_cpu.cpp -o tc && ./tc                       # naive
+g++ -std=c++17 -O3 -I. -DCUBLAS_CPU_USE_EIGEN test_cublas_cpu.cpp -o tce && ./tce  # Eigen
+```
+
+`test_cublas_cpu.cpp` checks every routine (all four transpose combos, batched,
+gemv N/T, rank-1, level-1) against hand references.
+
 ## Files
-- `cudnn_cpu.h` — the whole library (single header).
-- `test_cudnn_cpu.cpp` — correctness tests vs naive references.
+- `cudnn_cpu.h` — cuDNN subset (forward + backward), single header.
+- `cublas_cpu.h` — cuBLAS subset, single header.
+- `test_cudnn_cpu.cpp` / `test_backward.cpp` — cuDNN forward / backward tests.
+- `test_cublas_cpu.cpp` — cuBLAS tests.
 - `bench_conv.cpp` — naive-vs-Eigen conv timing.
-- `third_party/eigen_flat/` — vendored flat Eigen (used when `CUDNN_CPU_USE_EIGEN`).
+- `third_party/eigen_flat/` — vendored flat Eigen (used when `*_USE_EIGEN`).
