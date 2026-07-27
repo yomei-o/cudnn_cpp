@@ -1,143 +1,140 @@
 # cudnn_cpp
 
-Tiny, **header-only, source-available CPU implementations of the CUDA GPU-library APIs**
-that YOLO-style detectors use — **cuDNN**, **cuBLAS**, **Thrust** — so you can develop
-and correctness-test CUDA/GPU code on a **machine with no GPU** and no CUDA install.
+*(English version: [README.en.md](README.en.md))*
 
-| header | replaces | for |
+YOLO系の物体検出が使う **CUDAのGPUライブラリAPI** を、**ヘッダオンリー・ソース公開で
+CPU実装**したものです — **cuDNN**・**cuBLAS**・**Thrust**。**GPUの無いマシン**（CUDA未インストール）で、
+CUDA/GPU向けコードを開発し、正しさを検証できます。
+
+| ヘッダ | 置き換え対象 | 用途 |
 |---|---|---|
-| [`cudnn_cpu.h`](cudnn_cpu.h) | `<cudnn.h>` | conv/act/pool/softmax/bn — forward **and backward** |
-| [`cublas_cpu.h`](cublas_cpu.h) | `<cublas_v2.h>` | sgemm (+strided-batched), gemv, ger, level-1 |
-| [`thrust_cpu.h`](thrust_cpu.h) | `<thrust/*.h>` | device_vector, sort/sort_by_key, transform, reduce, scan, gather… |
-| [`cuda_runtime_cpu.h`](cuda_runtime_cpu.h) | `<cuda_runtime.h>` | cudaMalloc/Memcpy/Memset, streams, events, device queries |
+| [`cudnn_cpu.h`](cudnn_cpu.h) | `<cudnn.h>` | conv/act/pool/softmax/bn — **forward と backward** |
+| [`cublas_cpu.h`](cublas_cpu.h) | `<cublas_v2.h>` | sgemm(+strided-batched)・gemv・ger・level-1 |
+| [`thrust_cpu.h`](thrust_cpu.h) | `<thrust/*.h>` | device_vector・sort/sort_by_key・transform・reduce・scan・gather… |
+| [`cuda_runtime_cpu.h`](cuda_runtime_cpu.h) | `<cuda_runtime.h>` | cudaMalloc/Memcpy/Memset・stream・event・device照会 |
 
-With the runtime shim, a library-based CUDA program (buffers + cuDNN/cuBLAS/Thrust, no
-raw `<<<>>>` kernels) compiles and runs **unchanged** on a GPU-less box — see
-[`test_integration.cpp`](test_integration.cpp), a full detector-head pipeline
-(cudaMalloc → conv+bias+sigmoid → gemv → sort_by_key → cudaMemcpy) verified against a
-plain-C++ reference. cuDNN & cuBLAS share the optional Eigen backend. The rest of this
-README focuses on cuDNN; the others are summarized below
-([cuBLAS](#cublas_cpuh) · [Thrust](#thrust_cpuh) · [runtime](#cuda_runtime_cpuh)).
+ランタイムシムを併せて使えば、**ライブラリベースのCUDAプログラム**（バッファ操作 +
+cuDNN/cuBLAS/Thrust、生の `<<<>>>` カーネルを使わないもの）は、GPU無しのマシンで**そのまま
+（無改変で）**ビルド・実行できます。実例が [`test_integration.cpp`](test_integration.cpp) —
+検出ヘッダ風の一連の処理（cudaMalloc → conv+bias+sigmoid → gemv → sort_by_key → cudaMemcpy）を
+plain C++ のリファレンスと突き合わせて検証しています。cuDNN と cuBLAS は任意でEigenバックエンドを
+共有します。以下、まず cuDNN を詳しく、その他は後半にまとめます
+（[cuBLAS](#cublas_cpuh) · [Thrust](#thrust_cpuh) · [runtime](#cuda_runtime_cpuh)）。
 
-> **📚 Worked example — [`examples/mnist`](examples/mnist/README.md):** train an MLP
-> (cuBLAS+Thrust) and a CNN (cuDNN+cuBLAS+Thrust) on MNIST, then read a PNG and predict
-> the digit. The **same source builds on CPU (g++) or GPU (nvcc)** — four Colab notebooks
-> let students compare `images/sec` and *see* what a GPU buys them. Bilingual (JP/EN).
+> **📚 実践サンプル — [`examples/mnist`](examples/mnist/README.md):** MLP(cuBLAS+Thrust) と
+> CNN(cuDNN+cuBLAS+Thrust) を MNIST で学習し、PNG画像を読んで数字を推論します。**同じソースが
+> CPU(g++) でも GPU(nvcc) でもビルド可能**。4つの Colab ノートブックで `images/sec` を比較して、
+> GPUで何が得られるかを体感できます。日本語/英語 両対応。
 
 ---
 
-`cudnn_cpu.h` — a **CPU implementation of the cuDNN API subset**
-that YOLO-style detectors use — so you can develop and correctness-test cuDNN/GPU code
-on a **machine with no GPU** and no cuDNN install.
+`cudnn_cpu.h` — YOLO系が使う **cuDNN APIのサブセットをCPU実装** したもの。GPUの無いマシンで
+cuDNN/GPUコードを開発・検証できます。
 
-The point is the development loop: writing against cuDNN normally means every test run
-needs a GPU (e.g. burning Colab free-tier quota). With this header you build the *same
-source* on your CPU dev box, verify correctness instantly, and reserve the GPU only for
-the final confirmation run:
+狙いは開発ループにあります。ふつう cuDNN を使うコードは、テスト実行のたびにGPUが必要
+（例えばColabの無料枠を消費）です。このヘッダを使えば、**同じソース**をCPU開発機でビルドして
+即座に正しさを確認し、GPUは最終確認だけに温存できます：
 
 ```cpp
 #ifdef __CUDACC__
-  #include <cudnn.h>          // real GPU: link cuDNN
+  #include <cudnn.h>          // 本物のGPU: cuDNNをリンク
 #else
-  #include "cudnn_cpu.h"      // CPU dev box: this header, no GPU needed
+  #include "cudnn_cpu.h"      // CPU開発機: このヘッダ、GPU不要
 #endif
-// ... identical call sites: cudnnConvolutionForward(...), cudnnActivationForward(...) ...
+// ... 呼び出しは同一: cudnnConvolutionForward(...), cudnnActivationForward(...) ...
 ```
 
-The types, enums and function signatures mirror cuDNN's, so call sites don't change.
-It is **not** a bit-exact cuDNN clone (algorithm selection & workspace are ignored —
-`GetConvolutionForwardWorkspaceSize` returns 0); results match cuDNN's math to float
-precision. Only the pieces detectors actually need are implemented.
+型・enum・関数シグネチャは cuDNN に合わせてあるので、呼び出し側は変更不要です。
+ビット単位一致のクローンではありません（アルゴリズム選択やworkspaceは無視 —
+`GetConvolutionForwardWorkspaceSize` は 0 を返す）が、計算結果は float 精度で cuDNN と一致します。
+検出器が実際に必要とする部分だけを実装しています。
 
-## What's covered (the YOLO subset)
+## カバー範囲（YOLOサブセット）
 
-| cuDNN function | notes |
+| cuDNN 関数 | 備考 |
 |---|---|
-| `cudnnConvolutionForward` | grouped / **depthwise** (nano), cross-correlation, pads/strides/dilation |
-| `cudnnAddTensor` | bias broadcast `(1,C,1,1)`, residual |
-| `cudnnOpTensor` | ADD / MUL / MAX — MUL builds SiLU as `x·sigmoid(x)` |
+| `cudnnConvolutionForward` | grouped / **depthwise**(nano)、cross-correlation、pad/stride/dilation |
+| `cudnnAddTensor` | bias broadcast `(1,C,1,1)`、residual |
+| `cudnnOpTensor` | ADD / MUL / MAX — MUL で SiLU=`x·sigmoid(x)` を構成 |
 | `cudnnActivationForward` | SIGMOID, RELU, TANH, CLIPPED_RELU, IDENTITY |
-| `cudnnPoolingForward` | MAX (SPPF), AVG |
-| `cudnnSoftmaxForward` | per-channel (DFL) / per-instance |
-| `cudnnBatchNormalizationForwardInference` | spatial (per-channel) |
-| descriptors / handle | tensor4d, filter4d, conv2d (+group count), activation, pooling, opTensor |
+| `cudnnPoolingForward` | MAX(SPPF)、AVG |
+| `cudnnSoftmaxForward` | per-channel(DFL) / per-instance |
+| `cudnnBatchNormalizationForwardInference` | spatial(チャンネル毎) |
+| descriptor / handle | tensor4d, filter4d, conv2d(+group count), activation, pooling, opTensor |
 
-**Backward / training** (so you can train, not just infer, on CPU):
+**Backward / 学習**（推論だけでなくCPUで学習もできる）：
 
-| cuDNN function | notes |
+| cuDNN 関数 | 備考 |
 |---|---|
-| `cudnnConvolutionBackwardData` / `BackwardFilter` / `BackwardBias` | grouped/depthwise; Eigen gemm path |
+| `cudnnConvolutionBackwardData` / `BackwardFilter` / `BackwardBias` | grouped/depthwise、Eigen gemm経路 |
 | `cudnnActivationBackward` | sigmoid / relu / tanh / clipped-relu |
-| `cudnnPoolingBackward` | MAX (argmax routing) / AVG |
+| `cudnnPoolingBackward` | MAX(argmaxへ配分) / AVG |
 | `cudnnSoftmaxBackward` | channel / instance |
-| `cudnnBatchNormalizationForwardTraining` + `BatchNormalizationBackward` | batch stats, running-stat update, grad through the statistics |
+| `cudnnBatchNormalizationForwardTraining` + `BatchNormalizationBackward` | バッチ統計・running統計更新・統計を通した勾配 |
 
-Every backward op is checked by finite-difference VJP in `test_backward.cpp`
-(analytic grad vs central difference, rel diff ~1e-4).
+各backwardは `test_backward.cpp` で **有限差分VJP**（解析勾配 vs 中心差分、相対誤差 ~1e-4）検証済み。
 
-## Optional Eigen backend (fast)
+## 任意のEigenバックエンド（高速）
 
-Define `CUDNN_CPU_USE_EIGEN` to route the heavy math through the header-only, vendored
-[`eigen_flat`](third_party/eigen_flat/) (flattened single-directory Eigen — the same one
-used across the yolo* repos). Convolution becomes **im2col + Eigen gemm**; elementwise
-ops vectorize via `Eigen::Array`. Without the macro the header is fully standalone
-(naive loops), so it always works with zero dependencies.
+`CUDNN_CPU_USE_EIGEN` を定義すると、重い計算がヘッダオンリーで同梱の
+[`eigen_flat`](third_party/eigen_flat/)（1ディレクトリにフラット化したEigen。yolo*リポジトリ群と共通）
+経由になります。畳み込みは **im2col + Eigen gemm** に、要素演算は `Eigen::Array` でベクトル化。
+マクロ無しならヘッダ単体（素朴ループ）で動くので、常に依存ゼロで動作します。
 
 ```
 conv 1x64x128x128 k3 -> 64 ch
   [naive]  860 ms/iter   (1.4 GFLOP/s)
-  [EIGEN]   61 ms/iter  (19.9 GFLOP/s)   ~14x, identical output
+  [EIGEN]   61 ms/iter  (19.9 GFLOP/s)   約14倍、出力は一致
 ```
 
-## Build & test
+## ビルド & テスト
 
 ```sh
-# standalone (no deps)
+# 単体（依存なし）
 g++ -std=c++17 -O2 -I. test_cudnn_cpu.cpp -o t && ./t
 
-# with the Eigen backend
+# Eigenバックエンド
 g++ -std=c++17 -O3 -I. -DCUDNN_CPU_USE_EIGEN test_cudnn_cpu.cpp -o te && ./te
 
-# backward / training ops (finite-difference gradient check)
+# backward / 学習op（有限差分での勾配チェック）
 g++ -std=c++17 -O2 -I. test_backward.cpp -o tb && ./tb
 
-# benchmark one conv layer
+# conv 1層のベンチ
 g++ -std=c++17 -O3 -I. -DCUDNN_CPU_USE_EIGEN bench_conv.cpp -o b && ./b
 ```
 
-`test_cudnn_cpu.cpp` checks every op against an independent naive reference; both
-backends produce identical results (diffs are float rounding only).
+`test_cudnn_cpu.cpp` は各opを独立した素朴リファレンスと突き合わせます。両バックエンドの結果は
+一致します（差はfloat丸めのみ）。
 
 ## cublas_cpu.h
 
-CPU implementation of the cuBLAS (single-precision) subset, honoring cuBLAS's
-**column-major** layout, `op(A)` transposes and `lda/ldb/ldc` exactly:
+cuBLAS(単精度)サブセットのCPU実装。cuBLASの **列優先(column-major)** レイアウト、
+`op(A)` の転置、`lda/ldb/ldc` を忠実に扱います：
 
-`cublasSgemm` (all N/T combos, with beta), `cublasSgemmStridedBatched`,
-`cublasSgemv`, `cublasSger`, and level-1 `Saxpy/Sscal/Scopy/Sdot/Sasum/Snrm2/Isamax/Sswap`.
-`Isamax` returns a 1-based index like the real one. Optional Eigen backend via
-`CUBLAS_CPU_USE_EIGEN` (Eigen is column-major too, so the map is direct).
+`cublasSgemm`(全N/T組合せ+beta)、`cublasSgemmStridedBatched`、`cublasSgemv`、`cublasSger`、
+level-1 の `Saxpy/Sscal/Scopy/Sdot/Sasum/Snrm2/Isamax/Sswap`。`Isamax` は本物同様に1始まりの
+インデックスを返します。任意で `CUBLAS_CPU_USE_EIGEN`（Eigenも列優先なので直接マップ）。
 
 ```sh
-g++ -std=c++17 -O2 -I. test_cublas_cpu.cpp -o tc && ./tc                       # naive
-g++ -std=c++17 -O3 -I. -DCUBLAS_CPU_USE_EIGEN test_cublas_cpu.cpp -o tce && ./tce  # Eigen
+g++ -std=c++17 -O2 -I. test_cublas_cpu.cpp -o tc && ./tc                          # naive
+g++ -std=c++17 -O3 -I. -DCUBLAS_CPU_USE_EIGEN test_cublas_cpu.cpp -o tce && ./tce # Eigen
 ```
 
-`test_cublas_cpu.cpp` checks every routine (all four transpose combos, batched,
-gemv N/T, rank-1, level-1) against hand references.
+`test_cublas_cpu.cpp` が全ルーチン（4通りの転置・batched・gemv N/T・rank-1・level-1）を
+リファレンスと照合します。
 
 ## thrust_cpu.h
 
-CPU implementation of the Thrust API subset — include it **instead of** `<thrust/*.h>`
-to build & test without the full CCCL/CUB dependency (everything runs serially on the
-host; `thrust::device`/`host`/`seq` policies are accepted and ignored).
+Thrust APIサブセットのCPU実装 — `<thrust/*.h>` の**代わりに**includeすれば、巨大な
+CCCL/CUB依存なしでビルド・検証できます（すべてホスト上で逐次実行、`thrust::device`/`host`/`seq`
+ポリシーは受理して無視）。
 
-Containers: `device_vector` / `host_vector` (host memory), `raw_pointer_cast`.
-Algorithms: `transform`, `reduce`, `transform_reduce`, `inner_product`, `sort`,
-`sort_by_key` / `stable_sort_by_key` (the NMS pattern), `inclusive/exclusive_scan`,
-`copy_if`, `remove_if`, `unique`, `count_if`, `max/min_element`, `gather`, `scatter`,
-`reduce_by_key`, `sequence`, `fill`. Functors (`plus`, `multiplies`, `maximum`,
-`greater`, …) and `counting_iterator` / `constant_iterator`.
+コンテナ: `device_vector` / `host_vector`(ホストメモリ)、`raw_pointer_cast`。
+アルゴリズム: `transform`・`reduce`・`transform_reduce`・`inner_product`・`sort`・
+`sort_by_key`/`stable_sort_by_key`(NMSパターン)・`inclusive/exclusive_scan`・`copy_if`・
+`remove_if`・`unique`・`count_if`・`max/min_element`・`gather`・`scatter`・`reduce_by_key`・
+`sequence`・`fill`。functor(`plus`,`multiplies`,`maximum`,`greater`…) と
+`counting_iterator`/`constant_iterator`。
 
 ```sh
 g++ -std=c++17 -O2 -I. test_thrust_cpu.cpp -o tt && ./tt
@@ -145,29 +142,30 @@ g++ -std=c++17 -O2 -I. test_thrust_cpu.cpp -o tt && ./tt
 
 ## cuda_runtime_cpu.h
 
-CPU shim for the CUDA runtime subset — include **instead of** `<cuda_runtime.h>`.
-"Device" memory is host memory; streams are no-ops; events time with `std::chrono`;
-`__host__`/`__device__` annotations are stripped so device-marked helpers compile.
+CUDAランタイム・サブセットのCPUシム — `<cuda_runtime.h>` の**代わりに**include。
+「デバイス」メモリはホストメモリ、streamはno-op、eventは `std::chrono` で計時、
+`__host__`/`__device__` 注釈は除去され、device指定のヘルパもコンパイルできます。
 
-`cudaMalloc` / `cudaFree` / `cudaMallocHost`, `cudaMemcpy` / `cudaMemcpyAsync` /
-`cudaMemset`, `cudaStreamCreate/Destroy/Synchronize`, `cudaEventCreate/Record/
-ElapsedTime`, `cudaDeviceSynchronize`, `cudaGetDeviceCount/Properties`, error helpers.
+`cudaMalloc` / `cudaFree` / `cudaMallocHost`、`cudaMemcpy` / `cudaMemcpyAsync` /
+`cudaMemset`、`cudaStreamCreate/Destroy/Synchronize`、`cudaEventCreate/Record/ElapsedTime`、
+`cudaDeviceSynchronize`、`cudaGetDeviceCount/Properties`、エラー処理ヘルパ。
 
-**Limitation:** it does not launch raw `__global__` kernels (`<<<>>>` needs nvcc). Code
-that drives the GPU through cuDNN/cuBLAS/Thrust + manual buffers needs no kernels, so it
-builds and runs fully on CPU — that's the target.
+**制約:** 生の `__global__` カーネル（`<<<>>>`）は起動できません（nvccが必要）。GPUを
+cuDNN/cuBLAS/Thrust + 手動バッファ経由で駆動するコードはカーネル不要なので、CPUで完全に動きます
+——それが狙いです。
 
 ```sh
-g++ -std=c++17 -O2 -I. test_integration.cpp -o ti && ./ti   # end-to-end pipeline, all shims
+g++ -std=c++17 -O2 -I. test_integration.cpp -o ti && ./ti   # 全シムを使う通しパイプライン
 ```
 
-## Files
-- `cudnn_cpu.h` — cuDNN subset (forward + backward), single header.
-- `cublas_cpu.h` — cuBLAS subset, single header.
-- `thrust_cpu.h` — Thrust subset, single header.
-- `cuda_runtime_cpu.h` — CUDA runtime subset, single header.
-- `test_cudnn_cpu.cpp` / `test_backward.cpp` — cuDNN forward / backward tests.
-- `test_cublas_cpu.cpp` / `test_thrust_cpu.cpp` — cuBLAS / Thrust tests.
-- `test_integration.cpp` — end-to-end GPU-style pipeline across all four shims.
-- `bench_conv.cpp` — naive-vs-Eigen conv timing.
-- `third_party/eigen_flat/` — vendored flat Eigen (used when `*_USE_EIGEN`).
+## ファイル
+- `cudnn_cpu.h` — cuDNNサブセット（forward + backward）、単一ヘッダ。
+- `cublas_cpu.h` — cuBLASサブセット、単一ヘッダ。
+- `thrust_cpu.h` — Thrustサブセット、単一ヘッダ。
+- `cuda_runtime_cpu.h` — CUDAランタイム・サブセット、単一ヘッダ。
+- `test_cudnn_cpu.cpp` / `test_backward.cpp` — cuDNN forward / backward テスト。
+- `test_cublas_cpu.cpp` / `test_thrust_cpu.cpp` — cuBLAS / Thrust テスト。
+- `test_integration.cpp` — 全4シムを使うGPU風の通しパイプライン。
+- `bench_conv.cpp` — naive vs Eigen のconv計時。
+- `third_party/eigen_flat/` — 同梱のフラットEigen（`*_USE_EIGEN` 時に使用）。
+- `examples/mnist/` — MNIST教材（GPU無しでGPUを学ぶ）。
