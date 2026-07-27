@@ -20,7 +20,10 @@ typedef enum { CUBLAS_FILL_MODE_LOWER = 0, CUBLAS_FILL_MODE_UPPER = 1 } cublasFi
 typedef enum { CUBLAS_DEFAULT_MATH = 0, CUBLAS_TENSOR_OP_MATH = 1 } cublasMath_t;
 struct cublasContext { int _ = 0; };
 typedef cublasContext* cublasHandle_t;
+#ifndef CUDA_STREAM_T_DEFINED   // may already come from cuda_runtime_cpu.h / <cuda_runtime.h>
+#define CUDA_STREAM_T_DEFINED 1
 typedef void* cudaStream_t;   // opaque; ignored on CPU
+#endif
 
 inline cublasStatus_t cublasCreate_v2(cublasHandle_t* h){ *h=new cublasContext; return CUBLAS_STATUS_SUCCESS; }
 inline cublasStatus_t cublasDestroy_v2(cublasHandle_t h){ delete h; return CUBLAS_STATUS_SUCCESS; }

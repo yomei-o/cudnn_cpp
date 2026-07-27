@@ -9,10 +9,15 @@ and correctness-test CUDA/GPU code on a **machine with no GPU** and no CUDA inst
 | [`cudnn_cpu.h`](cudnn_cpu.h) | `<cudnn.h>` | conv/act/pool/softmax/bn — forward **and backward** |
 | [`cublas_cpu.h`](cublas_cpu.h) | `<cublas_v2.h>` | sgemm (+strided-batched), gemv, ger, level-1 |
 | [`thrust_cpu.h`](thrust_cpu.h) | `<thrust/*.h>` | device_vector, sort/sort_by_key, transform, reduce, scan, gather… |
+| [`cuda_runtime_cpu.h`](cuda_runtime_cpu.h) | `<cuda_runtime.h>` | cudaMalloc/Memcpy/Memset, streams, events, device queries |
 
-cuDNN & cuBLAS share the optional Eigen backend and the same drop-in idea. The rest of
-this README focuses on cuDNN; cuBLAS and Thrust are summarized below
-([cuBLAS](#cublas_cpuh) · [Thrust](#thrust_cpuh)).
+With the runtime shim, a library-based CUDA program (buffers + cuDNN/cuBLAS/Thrust, no
+raw `<<<>>>` kernels) compiles and runs **unchanged** on a GPU-less box — see
+[`test_integration.cpp`](test_integration.cpp), a full detector-head pipeline
+(cudaMalloc → conv+bias+sigmoid → gemv → sort_by_key → cudaMemcpy) verified against a
+plain-C++ reference. cuDNN & cuBLAS share the optional Eigen backend. The rest of this
+README focuses on cuDNN; the others are summarized below
+([cuBLAS](#cublas_cpuh) · [Thrust](#thrust_cpuh) · [runtime](#cuda_runtime_cpuh)).
 
 ---
 
@@ -133,11 +138,31 @@ Algorithms: `transform`, `reduce`, `transform_reduce`, `inner_product`, `sort`,
 g++ -std=c++17 -O2 -I. test_thrust_cpu.cpp -o tt && ./tt
 ```
 
+## cuda_runtime_cpu.h
+
+CPU shim for the CUDA runtime subset — include **instead of** `<cuda_runtime.h>`.
+"Device" memory is host memory; streams are no-ops; events time with `std::chrono`;
+`__host__`/`__device__` annotations are stripped so device-marked helpers compile.
+
+`cudaMalloc` / `cudaFree` / `cudaMallocHost`, `cudaMemcpy` / `cudaMemcpyAsync` /
+`cudaMemset`, `cudaStreamCreate/Destroy/Synchronize`, `cudaEventCreate/Record/
+ElapsedTime`, `cudaDeviceSynchronize`, `cudaGetDeviceCount/Properties`, error helpers.
+
+**Limitation:** it does not launch raw `__global__` kernels (`<<<>>>` needs nvcc). Code
+that drives the GPU through cuDNN/cuBLAS/Thrust + manual buffers needs no kernels, so it
+builds and runs fully on CPU — that's the target.
+
+```sh
+g++ -std=c++17 -O2 -I. test_integration.cpp -o ti && ./ti   # end-to-end pipeline, all shims
+```
+
 ## Files
 - `cudnn_cpu.h` — cuDNN subset (forward + backward), single header.
 - `cublas_cpu.h` — cuBLAS subset, single header.
 - `thrust_cpu.h` — Thrust subset, single header.
+- `cuda_runtime_cpu.h` — CUDA runtime subset, single header.
 - `test_cudnn_cpu.cpp` / `test_backward.cpp` — cuDNN forward / backward tests.
 - `test_cublas_cpu.cpp` / `test_thrust_cpu.cpp` — cuBLAS / Thrust tests.
+- `test_integration.cpp` — end-to-end GPU-style pipeline across all four shims.
 - `bench_conv.cpp` — naive-vs-Eigen conv timing.
 - `third_party/eigen_flat/` — vendored flat Eigen (used when `*_USE_EIGEN`).
