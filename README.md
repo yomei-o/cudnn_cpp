@@ -1,16 +1,18 @@
 # cudnn_cpp
 
 Tiny, **header-only, source-available CPU implementations of the CUDA GPU-library APIs**
-that YOLO-style detectors use — **cuDNN**, **cuBLAS**, (Thrust next) — so you can develop
+that YOLO-style detectors use — **cuDNN**, **cuBLAS**, **Thrust** — so you can develop
 and correctness-test CUDA/GPU code on a **machine with no GPU** and no CUDA install.
 
 | header | replaces | for |
 |---|---|---|
 | [`cudnn_cpu.h`](cudnn_cpu.h) | `<cudnn.h>` | conv/act/pool/softmax/bn — forward **and backward** |
 | [`cublas_cpu.h`](cublas_cpu.h) | `<cublas_v2.h>` | sgemm (+strided-batched), gemv, ger, level-1 |
+| [`thrust_cpu.h`](thrust_cpu.h) | `<thrust/*.h>` | device_vector, sort/sort_by_key, transform, reduce, scan, gather… |
 
-Both share the optional Eigen backend and the same drop-in idea. The rest of this README
-focuses on cuDNN; cuBLAS is summarized [below](#cublas_cpuh).
+cuDNN & cuBLAS share the optional Eigen backend and the same drop-in idea. The rest of
+this README focuses on cuDNN; cuBLAS and Thrust are summarized below
+([cuBLAS](#cublas_cpuh) · [Thrust](#thrust_cpuh)).
 
 ---
 
@@ -114,10 +116,28 @@ g++ -std=c++17 -O3 -I. -DCUBLAS_CPU_USE_EIGEN test_cublas_cpu.cpp -o tce && ./tc
 `test_cublas_cpu.cpp` checks every routine (all four transpose combos, batched,
 gemv N/T, rank-1, level-1) against hand references.
 
+## thrust_cpu.h
+
+CPU implementation of the Thrust API subset — include it **instead of** `<thrust/*.h>`
+to build & test without the full CCCL/CUB dependency (everything runs serially on the
+host; `thrust::device`/`host`/`seq` policies are accepted and ignored).
+
+Containers: `device_vector` / `host_vector` (host memory), `raw_pointer_cast`.
+Algorithms: `transform`, `reduce`, `transform_reduce`, `inner_product`, `sort`,
+`sort_by_key` / `stable_sort_by_key` (the NMS pattern), `inclusive/exclusive_scan`,
+`copy_if`, `remove_if`, `unique`, `count_if`, `max/min_element`, `gather`, `scatter`,
+`reduce_by_key`, `sequence`, `fill`. Functors (`plus`, `multiplies`, `maximum`,
+`greater`, …) and `counting_iterator` / `constant_iterator`.
+
+```sh
+g++ -std=c++17 -O2 -I. test_thrust_cpu.cpp -o tt && ./tt
+```
+
 ## Files
 - `cudnn_cpu.h` — cuDNN subset (forward + backward), single header.
 - `cublas_cpu.h` — cuBLAS subset, single header.
+- `thrust_cpu.h` — Thrust subset, single header.
 - `test_cudnn_cpu.cpp` / `test_backward.cpp` — cuDNN forward / backward tests.
-- `test_cublas_cpu.cpp` — cuBLAS tests.
+- `test_cublas_cpu.cpp` / `test_thrust_cpu.cpp` — cuBLAS / Thrust tests.
 - `bench_conv.cpp` — naive-vs-Eigen conv timing.
 - `third_party/eigen_flat/` — vendored flat Eigen (used when `*_USE_EIGEN`).
