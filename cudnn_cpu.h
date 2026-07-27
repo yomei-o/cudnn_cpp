@@ -237,3 +237,183 @@ inline cudnnStatus_t cudnnBatchNormalizationForwardInference(cudnnHandle_t,cudnn
   }
   return CUDNN_STATUS_SUCCESS;
 }
+
+// ======================================================================================
+//  BACKWARD / TRAINING SUBSET
+// ======================================================================================
+typedef enum { CUDNN_CONVOLUTION_BWD_DATA_ALGO_0 = 0 } cudnnConvolutionBwdDataAlgo_t;
+typedef enum { CUDNN_CONVOLUTION_BWD_FILTER_ALGO_0 = 0 } cudnnConvolutionBwdFilterAlgo_t;
+inline cudnnStatus_t cudnnGetConvolutionBackwardDataWorkspaceSize(cudnnHandle_t,const cudnnFilterDescriptor_t,const cudnnTensorDescriptor_t,const cudnnConvolutionDescriptor_t,const cudnnTensorDescriptor_t,cudnnConvolutionBwdDataAlgo_t,size_t* s){ *s=0; return CUDNN_STATUS_SUCCESS; }
+inline cudnnStatus_t cudnnGetConvolutionBackwardFilterWorkspaceSize(cudnnHandle_t,const cudnnTensorDescriptor_t,const cudnnTensorDescriptor_t,const cudnnConvolutionDescriptor_t,const cudnnFilterDescriptor_t,cudnnConvolutionBwdFilterAlgo_t,size_t* s){ *s=0; return CUDNN_STATUS_SUCCESS; }
+
+// ---- conv backward data: dx = alpha * (dy ⊛ w)  + beta*dx  (grad w.r.t. input) ----
+inline cudnnStatus_t cudnnConvolutionBackwardData(cudnnHandle_t,const void* alpha,
+    const cudnnFilterDescriptor_t wd,const void* wp,const cudnnTensorDescriptor_t dyd,const void* dyp,
+    const cudnnConvolutionDescriptor_t cd,cudnnConvolutionBwdDataAlgo_t,void*,size_t,
+    const void* beta,const cudnnTensorDescriptor_t dxd,void* dxp){
+  float a=*(const float*)alpha,b=*(const float*)beta;
+  const float* W=(const float*)wp; const float* dY=(const float*)dyp; float* dX=(float*)dxp;
+  int N=dxd->n,Cin=dxd->c,H=dxd->h,Wd=dxd->w, Cout=dyd->c,OH=dyd->h,OW=dyd->w;
+  int kh=wd->h,kw=wd->w,G=cd->groups,cig=Cin/G,cog=Cout/G;
+  int64_t nx=(int64_t)N*Cin*H*Wd; for(int64_t i=0;i<nx;++i) dX[i]*=b;
+#ifdef CUDNN_CPU_USE_EIGEN
+  using namespace cudnn_cpu_detail; const int OHW=OH*OW,KK=cig*kh*kw;
+  for(int n=0;n<N;++n) for(int g=0;g<G;++g){
+    CRowMap Wm(W+(size_t)(g*cog)*KK,cog,KK);
+    CRowMap dYm(dY+((size_t)(n*Cout+g*cog)*OH)*OW,cog,OHW);
+    RowMat colg = Wm.transpose()*dYm;   // (KK x OHW) = grad columns
+    for(int ci=0;ci<cig;++ci){int icin=g*cig+ci;
+      for(int r=0;r<kh;++r)for(int s=0;s<kw;++s){int row=(ci*kh+r)*kw+s;
+        for(int oh=0;oh<OH;++oh){int ih=oh*cd->sh-cd->ph+r*cd->dh; if(ih<0||ih>=H)continue;
+          for(int ow=0;ow<OW;++ow){int iw=ow*cd->sw-cd->pw+s*cd->dw; if(iw<0||iw>=Wd)continue;
+            dX[((n*Cin+icin)*H+ih)*Wd+iw]+= a*colg(row,oh*OW+ow);}}}}
+  }
+#else
+  for(int n=0;n<N;++n)for(int co=0;co<Cout;++co){int g=co/cog;
+    for(int oh=0;oh<OH;++oh)for(int ow=0;ow<OW;++ow){float dyv=a*dY[((n*Cout+co)*OH+oh)*OW+ow];
+      for(int ci=0;ci<cig;++ci){int icin=g*cig+ci;
+        for(int r=0;r<kh;++r){int ih=oh*cd->sh-cd->ph+r*cd->dh; if(ih<0||ih>=H)continue;
+          for(int s=0;s<kw;++s){int iw=ow*cd->sw-cd->pw+s*cd->dw; if(iw<0||iw>=Wd)continue;
+            dX[((n*Cin+icin)*H+ih)*Wd+iw]+= dyv*W[((co*cig+ci)*kh+r)*kw+s];}}}}}
+#endif
+  return CUDNN_STATUS_SUCCESS;
+}
+
+// ---- conv backward filter: dw = alpha * (x ⋆ dy) + beta*dw  (grad w.r.t. weights) ----
+inline cudnnStatus_t cudnnConvolutionBackwardFilter(cudnnHandle_t,const void* alpha,
+    const cudnnTensorDescriptor_t xd,const void* xp,const cudnnTensorDescriptor_t dyd,const void* dyp,
+    const cudnnConvolutionDescriptor_t cd,cudnnConvolutionBwdFilterAlgo_t,void*,size_t,
+    const void* beta,const cudnnFilterDescriptor_t dwd,void* dwp){
+  float a=*(const float*)alpha,b=*(const float*)beta;
+  const float* X=(const float*)xp; const float* dY=(const float*)dyp; float* dW=(float*)dwp;
+  int N=xd->n,Cin=xd->c,H=xd->h,Wd=xd->w, Cout=dyd->c,OH=dyd->h,OW=dyd->w;
+  int kh=dwd->h,kw=dwd->w,G=cd->groups,cig=Cin/G,cog=Cout/G;
+  int64_t nw=(int64_t)Cout*cig*kh*kw; for(int64_t i=0;i<nw;++i) dW[i]*=b;
+#ifdef CUDNN_CPU_USE_EIGEN
+  using namespace cudnn_cpu_detail; const int OHW=OH*OW,KK=cig*kh*kw; RowMat col(KK,OHW);
+  for(int g=0;g<G;++g){ RowMat acc=RowMat::Zero(cog,KK);
+    for(int n=0;n<N;++n){
+      for(int ci=0;ci<cig;++ci){int icin=g*cig+ci;
+        for(int r=0;r<kh;++r)for(int s=0;s<kw;++s){int row=(ci*kh+r)*kw+s;
+          for(int oh=0;oh<OH;++oh){int ih=oh*cd->sh-cd->ph+r*cd->dh;
+            for(int ow=0;ow<OW;++ow){int iw=ow*cd->sw-cd->pw+s*cd->dw;
+              col(row,oh*OW+ow)=(ih<0||ih>=H||iw<0||iw>=Wd)?0.f:X[((n*Cin+icin)*H+ih)*Wd+iw];}}}}
+      CRowMap dYm(dY+((size_t)(n*Cout+g*cog)*OH)*OW,cog,OHW);
+      acc.noalias()+=dYm*col.transpose();
+    }
+    RowMap dWm(dW+(size_t)(g*cog)*KK,cog,KK); dWm += a*acc;   // dW already scaled by beta
+  }
+#else
+  for(int n=0;n<N;++n)for(int co=0;co<Cout;++co){int g=co/cog;
+    for(int oh=0;oh<OH;++oh)for(int ow=0;ow<OW;++ow){float dyv=a*dY[((n*Cout+co)*OH+oh)*OW+ow];
+      for(int ci=0;ci<cig;++ci){int icin=g*cig+ci;
+        for(int r=0;r<kh;++r){int ih=oh*cd->sh-cd->ph+r*cd->dh; if(ih<0||ih>=H)continue;
+          for(int s=0;s<kw;++s){int iw=ow*cd->sw-cd->pw+s*cd->dw; if(iw<0||iw>=Wd)continue;
+            dW[((co*cig+ci)*kh+r)*kw+s]+= dyv*X[((n*Cin+icin)*H+ih)*Wd+iw];}}}}}
+#endif
+  return CUDNN_STATUS_SUCCESS;
+}
+
+// ---- conv backward bias: db[c] = alpha * sum_{n,h,w} dy + beta*db ----
+inline cudnnStatus_t cudnnConvolutionBackwardBias(cudnnHandle_t,const void* alpha,const cudnnTensorDescriptor_t dyd,const void* dyp,const void* beta,const cudnnTensorDescriptor_t,void* dbp){
+  float a=*(const float*)alpha,b=*(const float*)beta; const float* dY=(const float*)dyp; float* dB=(float*)dbp;
+  int N=dyd->n,C=dyd->c,H=dyd->h,W=dyd->w;
+  for(int c=0;c<C;++c){ double s=0; for(int n=0;n<N;++n)for(int p=0;p<H*W;++p)s+=dY[((n*C+c)*H)*W+p]; dB[c]=a*(float)s+b*dB[c]; }
+  return CUDNN_STATUS_SUCCESS;
+}
+
+// ---- activation backward: dx = alpha * dy * f'(x)  + beta*dx ----
+inline cudnnStatus_t cudnnActivationBackward(cudnnHandle_t,const cudnnActivationDescriptor_t d,const void* alpha,const cudnnTensorDescriptor_t yd,const void* yp,const cudnnTensorDescriptor_t,const void* dyp,const cudnnTensorDescriptor_t,const void* xp,const void* beta,const cudnnTensorDescriptor_t,void* dxp){
+  float a=*(const float*)alpha,b=*(const float*)beta;
+  const float* Y=(const float*)yp; const float* dY=(const float*)dyp; const float* X=(const float*)xp; float* dX=(float*)dxp;
+  int64_t n=(int64_t)yd->n*yd->c*yd->h*yd->w;
+  for(int64_t i=0;i<n;++i){ float deriv;
+    switch(d->mode){
+      case CUDNN_ACTIVATION_SIGMOID: deriv=Y[i]*(1.f-Y[i]); break;
+      case CUDNN_ACTIVATION_RELU: deriv=X[i]>0?1.f:0.f; break;
+      case CUDNN_ACTIVATION_TANH: deriv=1.f-Y[i]*Y[i]; break;
+      case CUDNN_ACTIVATION_CLIPPED_RELU: deriv=(X[i]>0.f&&X[i]<(float)d->coef)?1.f:0.f; break;
+      default: deriv=1.f; }
+    dX[i]=a*dY[i]*deriv + b*dX[i]; }
+  return CUDNN_STATUS_SUCCESS;
+}
+
+// ---- pooling backward: route dy to argmax (MAX) or spread evenly (AVG) ----
+inline cudnnStatus_t cudnnPoolingBackward(cudnnHandle_t,const cudnnPoolingDescriptor_t d,const void* alpha,const cudnnTensorDescriptor_t yd,const void*,const cudnnTensorDescriptor_t,const void* dyp,const cudnnTensorDescriptor_t xd,const void* xp,const void* beta,const cudnnTensorDescriptor_t,void* dxp){
+  float a=*(const float*)alpha,b=*(const float*)beta;
+  const float* dY=(const float*)dyp; const float* X=(const float*)xp; float* dX=(float*)dxp;
+  int N=xd->n,C=xd->c,H=xd->h,W=xd->w,OH=yd->h,OW=yd->w;
+  int64_t nx=(int64_t)N*C*H*W; for(int64_t i=0;i<nx;++i) dX[i]*=b;
+  for(int n=0;n<N;++n)for(int c=0;c<C;++c)for(int oh=0;oh<OH;++oh)for(int ow=0;ow<OW;++ow){
+    float gd=a*dY[((n*C+c)*OH+oh)*OW+ow];
+    if(d->mode==CUDNN_POOLING_MAX){ float best=-1e30f;int bih=-1,biw=-1;
+      for(int r=0;r<d->kh;++r){int ih=oh*d->sh-d->ph+r; if(ih<0||ih>=H)continue;
+        for(int s=0;s<d->kw;++s){int iw=ow*d->sw-d->pw+s; if(iw<0||iw>=W)continue;
+          float v=X[((n*C+c)*H+ih)*W+iw]; if(v>best){best=v;bih=ih;biw=iw;}}}
+      if(bih>=0) dX[((n*C+c)*H+bih)*W+biw]+=gd;
+    } else { int cnt=0;
+      if(d->mode==CUDNN_POOLING_AVERAGE_COUNT_INCLUDE_PADDING) cnt=d->kh*d->kw;
+      else for(int r=0;r<d->kh;++r){int ih=oh*d->sh-d->ph+r; if(ih<0||ih>=H)continue; for(int s=0;s<d->kw;++s){int iw=ow*d->sw-d->pw+s; if(iw<0||iw>=W)continue; cnt++;}}
+      float sh=gd/std::max(cnt,1);
+      for(int r=0;r<d->kh;++r){int ih=oh*d->sh-d->ph+r; if(ih<0||ih>=H)continue; for(int s=0;s<d->kw;++s){int iw=ow*d->sw-d->pw+s; if(iw<0||iw>=W)continue; dX[((n*C+c)*H+ih)*W+iw]+=sh;}}
+    }
+  }
+  return CUDNN_STATUS_SUCCESS;
+}
+
+// ---- softmax backward: dx = alpha * y·(dy - Σ(dy·y)) + beta*dx ----
+inline cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t,cudnnSoftmaxAlgorithm_t,cudnnSoftmaxMode_t mode,const void* alpha,const cudnnTensorDescriptor_t yd,const void* yp,const cudnnTensorDescriptor_t,const void* dyp,const void* beta,const cudnnTensorDescriptor_t,void* dxp){
+  float a=*(const float*)alpha,b=*(const float*)beta;
+  const float* Y=(const float*)yp; const float* dY=(const float*)dyp; float* dX=(float*)dxp;
+  int N=yd->n,C=yd->c,H=yd->h,W=yd->w;
+  auto grp=[&](int base,int stride,int len){ double dot=0; for(int i=0;i<len;++i)dot+=(double)Y[base+i*stride]*dY[base+i*stride];
+    for(int i=0;i<len;++i){int j=base+i*stride; float gv=Y[j]*((float)dY[j]-(float)dot); dX[j]=a*gv+b*dX[j];} };
+  if(mode==CUDNN_SOFTMAX_MODE_CHANNEL) for(int n=0;n<N;++n)for(int h=0;h<H;++h)for(int w=0;w<W;++w) grp(((n*C)*H+h)*W+w,H*W,C);
+  else for(int n=0;n<N;++n) grp(n*C*H*W,1,C*H*W);
+  return CUDNN_STATUS_SUCCESS;
+}
+
+// ---- batchnorm forward TRAINING: normalize with batch stats, update running stats,
+//      save mean & invVar for backward. y = alpha*(scale*x̂+bias)+beta*y  (SPATIAL) ----
+inline cudnnStatus_t cudnnBatchNormalizationForwardTraining(cudnnHandle_t,cudnnBatchNormMode_t,const void* alpha,const void* beta,const cudnnTensorDescriptor_t xd,const void* xp,const cudnnTensorDescriptor_t,void* yp,const cudnnTensorDescriptor_t,const void* scale,const void* bias,double expAvgFactor,void* runningMean,void* runningVar,double eps,void* saveMean,void* saveInvVar){
+  float a=*(const float*)alpha,b=*(const float*)beta;
+  const float* X=(const float*)xp; float* Y=(float*)yp;
+  const float* g=(const float*)scale; const float* bt=(const float*)bias;
+  float* rm=(float*)runningMean; float* rv=(float*)runningVar; float* sm=(float*)saveMean; float* si=(float*)saveInvVar;
+  int N=xd->n,C=xd->c,H=xd->h,W=xd->w; int64_t m=(int64_t)N*H*W;
+  for(int c=0;c<C;++c){
+    double mean=0; for(int n=0;n<N;++n)for(int p=0;p<H*W;++p)mean+=X[((n*C+c)*H)*W+p]; mean/=m;
+    double var=0; for(int n=0;n<N;++n)for(int p=0;p<H*W;++p){double dd=X[((n*C+c)*H)*W+p]-mean; var+=dd*dd;} var/=m;
+    float meanf=(float)mean, invstd=1.f/std::sqrt((float)(var+eps));
+    if(sm) sm[c]=meanf; if(si) si[c]=invstd;
+    if(rm) rm[c]=(float)((1.0-expAvgFactor)*rm[c]+expAvgFactor*mean);
+    if(rv){ double unb=(m>1)?var*(double)m/(double)(m-1):var; rv[c]=(float)((1.0-expAvgFactor)*rv[c]+expAvgFactor*unb); }
+    for(int n=0;n<N;++n)for(int p=0;p<H*W;++p){int i=((n*C+c)*H)*W+p; float yv=g[c]*(X[i]-meanf)*invstd+bt[c]; Y[i]=a*yv+b*Y[i];}
+  }
+  return CUDNN_STATUS_SUCCESS;
+}
+
+// ---- batchnorm backward: dScale, dBias, and dx through the batch statistics.
+//      Uses savedMean/savedInvVar if given (else recomputes). SPATIAL (per-channel). ----
+inline cudnnStatus_t cudnnBatchNormalizationBackward(cudnnHandle_t,cudnnBatchNormMode_t,const void* alphaDataDiff,const void* betaDataDiff,const void* alphaParamDiff,const void* betaParamDiff,const cudnnTensorDescriptor_t xd,const void* xp,const cudnnTensorDescriptor_t,const void* dyp,const cudnnTensorDescriptor_t,void* dxp,const cudnnTensorDescriptor_t,const void* scale,void* dScaleP,void* dBiasP,double eps,const void* savedMean,const void* savedInvVar){
+  float aD=*(const float*)alphaDataDiff,bD=*(const float*)betaDataDiff,aP=*(const float*)alphaParamDiff,bP=*(const float*)betaParamDiff;
+  const float* X=(const float*)xp; const float* dY=(const float*)dyp; float* dX=(float*)dxp;
+  const float* g=(const float*)scale; float* dG=(float*)dScaleP; float* dB=(float*)dBiasP;
+  const float* sMean=(const float*)savedMean; const float* sInv=(const float*)savedInvVar;
+  int N=xd->n,C=xd->c,H=xd->h,W=xd->w; int64_t m=(int64_t)N*H*W;
+  for(int c=0;c<C;++c){
+    float mean,invstd;
+    if(sMean&&sInv){ mean=sMean[c]; invstd=sInv[c]; }
+    else{ double mn=0; for(int n=0;n<N;++n)for(int p=0;p<H*W;++p)mn+=X[((n*C+c)*H)*W+p]; mn/=m;
+      double vr=0; for(int n=0;n<N;++n)for(int p=0;p<H*W;++p){double dd=X[((n*C+c)*H)*W+p]-mn; vr+=dd*dd;} vr/=m;
+      mean=(float)mn; invstd=1.f/std::sqrt((float)(vr+eps)); }
+    double dbias=0,dscale=0;
+    for(int n=0;n<N;++n)for(int p=0;p<H*W;++p){int i=((n*C+c)*H)*W+p; float xhat=(X[i]-mean)*invstd; dbias+=dY[i]; dscale+=(double)dY[i]*xhat; }
+    for(int n=0;n<N;++n)for(int p=0;p<H*W;++p){int i=((n*C+c)*H)*W+p; float xhat=(X[i]-mean)*invstd;
+      float dxv=g[c]*invstd*((float)dY[i]-(float)dbias/m-xhat*(float)dscale/m);
+      dX[i]=aD*dxv + bD*dX[i]; }
+    if(dG) dG[c]=aP*(float)dscale+bP*dG[c];
+    if(dB) dB[c]=aP*(float)dbias+bP*dB[c];
+  }
+  return CUDNN_STATUS_SUCCESS;
+}

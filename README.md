@@ -36,7 +36,18 @@ precision. Only the pieces detectors actually need are implemented.
 | `cudnnBatchNormalizationForwardInference` | spatial (per-channel) |
 | descriptors / handle | tensor4d, filter4d, conv2d (+group count), activation, pooling, opTensor |
 
-(Backward / training ops are the planned next step.)
+**Backward / training** (so you can train, not just infer, on CPU):
+
+| cuDNN function | notes |
+|---|---|
+| `cudnnConvolutionBackwardData` / `BackwardFilter` / `BackwardBias` | grouped/depthwise; Eigen gemm path |
+| `cudnnActivationBackward` | sigmoid / relu / tanh / clipped-relu |
+| `cudnnPoolingBackward` | MAX (argmax routing) / AVG |
+| `cudnnSoftmaxBackward` | channel / instance |
+| `cudnnBatchNormalizationForwardTraining` + `BatchNormalizationBackward` | batch stats, running-stat update, grad through the statistics |
+
+Every backward op is checked by finite-difference VJP in `test_backward.cpp`
+(analytic grad vs central difference, rel diff ~1e-4).
 
 ## Optional Eigen backend (fast)
 
@@ -60,6 +71,9 @@ g++ -std=c++17 -O2 -I. test_cudnn_cpu.cpp -o t && ./t
 
 # with the Eigen backend
 g++ -std=c++17 -O3 -I. -DCUDNN_CPU_USE_EIGEN test_cudnn_cpu.cpp -o te && ./te
+
+# backward / training ops (finite-difference gradient check)
+g++ -std=c++17 -O2 -I. test_backward.cpp -o tb && ./tb
 
 # benchmark one conv layer
 g++ -std=c++17 -O3 -I. -DCUDNN_CPU_USE_EIGEN bench_conv.cpp -o b && ./b
