@@ -1,0 +1,7 @@
+# build artifacts
+*.exe
+*.o
+*.obj
+a.out
+# scratch
+scratch_*
